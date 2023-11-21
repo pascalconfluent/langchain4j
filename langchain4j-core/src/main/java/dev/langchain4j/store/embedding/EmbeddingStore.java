@@ -10,7 +10,7 @@ import java.util.List;
  * @param <Embedded> The class of the object that has been embedded. Typically, this is {@link dev.langchain4j.data.segment.TextSegment}.
  */
 public interface EmbeddingStore<Embedded> {
-
+    
     /**
      * Adds a given embedding to the store.
      *

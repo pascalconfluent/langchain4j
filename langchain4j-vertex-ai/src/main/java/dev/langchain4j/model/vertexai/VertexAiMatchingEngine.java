@@ -7,7 +7,7 @@ import com.google.cloud.storage.Bucket;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Streams;
+import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -19,13 +19,11 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.experimental.SuperBuilder;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.tuple.ImmutablePair;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 import java.util.stream.Collectors;
 
 import static dev.langchain4j.internal.Utils.*;
@@ -60,16 +58,6 @@ public class VertexAiMatchingEngine implements EmbeddingStore<TextSegment> {
     @Getter
     private final boolean avoidDups = true;
 
-    /**
-     * Add the text to the index.
-     *
-     * @param text the text
-     * @return the id of the text
-     */
-    public String addText(String text) {
-        return addAllSegments(singletonList(TextSegment.from(text))).get(0);
-    }
-
     @Override
     public String add(Embedding embedding) {
         return addAll(Lists.asList(embedding, new Embedding[]{})).get(0);
@@ -84,20 +72,7 @@ public class VertexAiMatchingEngine implements EmbeddingStore<TextSegment> {
     public String add(Embedding embedding, TextSegment textSegment) {
         return addAll(singletonList(embedding), singletonList(textSegment)).get(0);
     }
-
-    /**
-     * Adds all the text segments to the index.
-     *
-     * @param textSegments the text segments
-     * @return the ids of the text segments
-     */
-    public List<String> addAllSegments(List<TextSegment> textSegments) {
-        final List<Embedding> embeddings = embeddingModel
-                .embedAll(textSegments)
-                .content();
-        return addAll(embeddings, textSegments);
-    }
-
+    
     /**
      * Adds all the embeddings to the index.
      *
@@ -106,34 +81,7 @@ public class VertexAiMatchingEngine implements EmbeddingStore<TextSegment> {
      */
     @Override
     public List<String> addAll(List<Embedding> embeddings) {
-        if (isCollectionEmpty(embeddings)) {
-            log.info("Empty embeddings - no ops");
-            return new ArrayList<>();
-        }
-
-        final VertexAiEmbeddingIndex index = new VertexAiEmbeddingIndex();
-        final List<String> ids = embeddings
-                .stream()
-                .map(embedding -> {
-                    final String id = randomUUID();
-                    index.addEmbedding(id, embedding);
-                    return id;
-                })
-                .collect(Collectors.toList());
-
-        final String filename = "indexes/" + UUID.randomUUID() + ".json";
-
-        log.info("Uploading {} index to GCS.", filename);
-
-        // Upload the index to GCS
-        upload(index.toString(), filename);
-
-        // Update the index
-        getIndexEndpoint().upsertEmbedding(index);
-
-        log.info("Uploaded {} index to GCS.", filename);
-
-        return ids;
+        return addAll(null, embeddings, null);
     }
 
     /**
@@ -145,32 +93,54 @@ public class VertexAiMatchingEngine implements EmbeddingStore<TextSegment> {
      */
     @Override
     public List<String> addAll(List<Embedding> embeddings, List<TextSegment> embedded) {
+        return addAll(null, embeddings, embedded);
+    }
+
+    @Override
+    public List<String> addAll(List<String> ids, List<Embedding> embeddings, List<TextSegment> embedded) {
         if (isCollectionEmpty(embeddings)) {
             log.info("Empty embeddings - no ops");
             return new ArrayList<>();
         }
-        ensureTrue(embedded != null, "embedded is null");
-        ensureTrue(embedded.size() == embeddings.size(), "embeddings size is not equal to embedded size");
+        ensureTrue(embedded == null || embedded.size() == embeddings.size(), "embeddings size is not equal to embedded size");
+        ensureTrue(ids == null || ids.size() == embeddings.size(), "ids size is not equal to embeddings size");
 
         final VertexAiEmbeddingIndex index = new VertexAiEmbeddingIndex();
 
-        final List<String> ids = Streams
-                .zip(embeddings.stream(),
-                        embedded.stream(),
-                        ImmutablePair::new)
-                .map(pair -> {
-                    final TextSegment textSegment = pair.getRight();
-                    final String id = avoidDups ? generateUUIDFrom(textSegment.text()) : randomUUID();
+        final String indexFileId = randomUUID();
+        for (int embeddingIndex = 0; embeddingIndex < embeddings.size(); embeddingIndex++) {
+            final Embedding embedding = embeddings.get(embeddingIndex);
 
-                    index.addEmbedding(id, pair.getLeft(), textSegment.metadata());
-                    upload(textSegment.text(), "documents/" + id);
+            TextSegment textSegment;
+            Metadata metadata;
+            String id;
+            if (embedded != null) {
+                textSegment = embedded.get(embeddingIndex);
+                metadata = textSegment.metadata();
+                id = (ids != null)
+                        ? ids.get(embeddingIndex)
+                        : (avoidDups ? generateUUIDFrom(textSegment.text()) : randomUUID());
+            } else {
+                textSegment = null;
+                metadata = null;
+                id = (ids != null)
+                        ? ids.get(embeddingIndex)
+                        : randomUUID();
+            }
+            if (metadata == null) {
+                metadata = Metadata.metadata("idxFileId", indexFileId);
+            } else {
+                metadata.add("idxFileId", indexFileId);
+            }
 
-                    return id;
-                })
-                .collect(Collectors.toList());
+            index.addEmbedding(id, embedding, metadata);
 
-        final String filename = "indexes/" + UUID.randomUUID() + ".json";
+            if (textSegment != null) {
+                upload(textSegment.text(), "documents/" + id);
+            }
+        }
 
+        final String filename = "indexes/" + indexFileId + ".json";
         log.info("Uploading {} index to GCS.", filename);
 
         // Upload the index to GCS

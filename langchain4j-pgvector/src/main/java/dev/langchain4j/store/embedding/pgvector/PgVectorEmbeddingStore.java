@@ -9,14 +9,14 @@ import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import lombok.Builder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Type;
 import java.sql.*;
 import java.util.*;
 
 import static dev.langchain4j.internal.Utils.*;
+import static dev.langchain4j.internal.Utils.generateUUIDFrom;
 import static dev.langchain4j.internal.ValidationUtils.*;
 import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
@@ -27,18 +27,17 @@ import static java.util.stream.Collectors.toList;
  * Only cosine similarity is used.
  * Only ivfflat index is used.
  */
+@Slf4j
 public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
 
-    private static final Logger log = LoggerFactory.getLogger(PgVectorEmbeddingStore.class);
-
     private static final Gson GSON = new Gson();
-
     private final String host;
     private final Integer port;
     private final String user;
     private final String password;
     private final String database;
     private final String table;
+    private final boolean avoidDups;
 
     /**
      * All args constructor for PgVectorEmbeddingStore Class
@@ -67,13 +66,15 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
             Boolean useIndex,
             Integer indexListSize,
             Boolean createTable,
-            Boolean dropTableFirst) {
+            Boolean dropTableFirst,
+            Boolean avoidDups) {
         this.host = ensureNotBlank(host, "host");
         this.port = ensureGreaterThanZero(port, "port");
         this.user = ensureNotBlank(user, "user");
         this.password = ensureNotBlank(password, "password");
         this.database = ensureNotBlank(database, "database");
         this.table = ensureNotBlank(table, "table");
+        this.avoidDups = getOrDefault(avoidDups, true);
 
         useIndex = getOrDefault(useIndex, false);
         createTable = getOrDefault(createTable, true);
@@ -88,7 +89,7 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
             if (createTable) {
                 connection.createStatement().executeUpdate(String.format(
                         "CREATE TABLE IF NOT EXISTS %s (" +
-                                "embedding_id UUID PRIMARY KEY, " +
+                                "embedding_id VARCHAR PRIMARY KEY, " +
                                 "embedding vector(%s), " +
                                 "text TEXT NULL, " +
                                 "metadata JSON NULL" +
@@ -128,8 +129,8 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
      */
     @Override
     public String add(Embedding embedding) {
-        String id = randomUUID();
-        addInternal(id, embedding, null);
+        String id = createId(null, null);
+        addOrUpdate(id, embedding, null);
         return id;
     }
 
@@ -141,7 +142,7 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
      */
     @Override
     public void add(String id, Embedding embedding) {
-        addInternal(id, embedding, null);
+        addOrUpdate(id, embedding, null);
     }
 
     /**
@@ -153,8 +154,8 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
      */
     @Override
     public String add(Embedding embedding, TextSegment textSegment) {
-        String id = randomUUID();
-        addInternal(id, embedding, textSegment);
+        String id = createId(null, textSegment);
+        addOrUpdate(id, embedding, textSegment);
         return id;
     }
 
@@ -166,8 +167,11 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
      */
     @Override
     public List<String> addAll(List<Embedding> embeddings) {
-        List<String> ids = embeddings.stream().map(ignored -> randomUUID()).collect(toList());
-        addAllInternal(ids, embeddings, null);
+        List<String> ids = embeddings
+                .stream()
+                .map(ignored -> createId(null, null))
+                .collect(toList());
+        addOrUpdateAll(ids, embeddings, null);
         return ids;
     }
 
@@ -180,9 +184,80 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
      */
     @Override
     public List<String> addAll(List<Embedding> embeddings, List<TextSegment> embedded) {
-        List<String> ids = embeddings.stream().map(ignored -> randomUUID()).collect(toList());
-        addAllInternal(ids, embeddings, embedded);
+        List<String> ids = embedded
+                .stream()
+                .map(segment -> createId(null, segment))
+                .collect(toList());
+        addOrUpdateAll(ids, embeddings, embedded);
         return ids;
+    }
+
+    /**
+     * Adds a given embedding to the store.
+     *
+     * @param id          The unique identifier for the embedding to be added.
+     * @param embedding   The embedding to be added to the store.
+     * @param textSegment Original content that was embedded.
+     */
+    @Override
+    public void add(String id, Embedding embedding, TextSegment textSegment) {
+        addOrUpdate(id, embedding, textSegment);
+    }
+
+    /**
+     * Adds multiple embeddings to the store.
+     *
+     * @param ids        A list of unique identifiers for the embeddings to be added.
+     * @param embeddings A list of embeddings to be added to the store.
+     * @param embedded   A list of original contents that were embedded.
+     * @return A list of auto-generated IDs associated with the added embeddings.
+     */
+    @Override
+    public List<String> addAll(List<String> ids, List<Embedding> embeddings, List<TextSegment> embedded) {
+        addOrUpdateAll(ids, embeddings, embedded);
+        return ids;
+    }
+
+    @Override
+    public void update(String id, Embedding embedding) {
+        update(id, embedding, null);
+    }
+
+    @Override
+    public void update(String id, Embedding embedding, TextSegment textSegment) {
+        updateAll(id != null ? singletonList(id) : null,
+                singletonList(embedding),
+                textSegment != null ? singletonList(textSegment) : null);
+    }
+
+    @Override
+    public void updateAll(List<String> ids, List<Embedding> embeddings, List<TextSegment> embedded) {
+        addOrUpdateAll(ids, embeddings, embedded);
+    }
+
+    @Override
+    public void delete(String id) {
+        deleteAll(singletonList(id));
+    }
+
+    @Override
+    public void deleteAll(List<String> ids) {
+        try (Connection connection = setupConnection()) {
+            final String idList = ids.stream()
+                    .map(id -> "'" + id + "'")
+                    .reduce((a, b) -> a + ", " + b)
+                    .orElse("");
+            String query = String.format(
+                    "DELETE FROM %s WHERE embedding_id IN (%s)",
+                    table,
+                    idList);
+            PreparedStatement deleteStmt = connection.prepareStatement(query);
+            deleteStmt.executeUpdate();
+        } catch (SQLException e) {
+            log.error("Failed to delete from database", e);
+            throw new RuntimeException(e);
+        }
+
     }
 
     /**
@@ -233,15 +308,30 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
         return result;
     }
 
-    private void addInternal(String id, Embedding embedding, TextSegment embedded) {
-        addAllInternal(
-                singletonList(id),
+    /**
+     * Adds or updates a given embedding to the store.
+     *
+     * @param id        The unique identifier for the embedding to be added.
+     * @param embedding The embedding to be added to the store.
+     * @param embedded  Original content that was embedded.
+     */
+    private void addOrUpdate(String id, Embedding embedding, TextSegment embedded) {
+        addOrUpdateAll(
+                id == null ? null : singletonList(id),
                 singletonList(embedding),
                 embedded == null ? null : singletonList(embedded));
     }
 
-    private void addAllInternal(
-            List<String> ids, List<Embedding> embeddings, List<TextSegment> embedded) {
+    /**
+     * Adds or updates multiple embeddings to the store.
+     *
+     * @param ids        The unique identifiers for the embeddings to be added.
+     * @param embeddings The embeddings to be added to the store.
+     * @param embedded   Original content that was embedded.
+     */
+    private void addOrUpdateAll(List<String> ids,
+                                List<Embedding> embeddings,
+                                List<TextSegment> embedded) {
         if (isCollectionEmpty(ids) || isCollectionEmpty(embeddings)) {
             log.info("Empty embeddings - no ops");
             return;
@@ -262,7 +352,7 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
             PreparedStatement upsertStmt = connection.prepareStatement(query);
 
             for (int i = 0; i < ids.size(); ++i) {
-                upsertStmt.setObject(1, UUID.fromString(ids.get(i)));
+                upsertStmt.setObject(1, createId(ids.get(i), embedded == null ? null : embedded.get(i)));
                 upsertStmt.setObject(2, new PGvector(embeddings.get(i).vector()));
 
                 if (embedded != null && embedded.get(i) != null) {
@@ -277,9 +367,27 @@ public class PgVectorEmbeddingStore implements EmbeddingStore<TextSegment> {
             }
 
             upsertStmt.executeBatch();
-
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /**
+     * Creates a new ID for the given embedding.
+     *
+     * @param id       The ID to be used. If null or blank, a new ID will be generated.
+     * @param embedded The original content that was embedded.
+     * @return The ID to be used for the given embedding.
+     */
+    private String createId(String id, TextSegment embedded) {
+        if (isNullOrBlank(id)) {
+            if (embedded != null && avoidDups) {
+                return generateUUIDFrom(embedded.text());
+            }
+
+            return randomUUID();
+        }
+
+        return id;
     }
 }
