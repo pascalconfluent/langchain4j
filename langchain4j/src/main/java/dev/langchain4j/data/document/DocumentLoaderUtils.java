@@ -1,5 +1,6 @@
 package dev.langchain4j.data.document;
 
+import dev.langchain4j.data.document.parser.MarkdownDocumentParser;
 import dev.langchain4j.data.document.parser.MsOfficeDocumentParser;
 import dev.langchain4j.data.document.parser.PdfDocumentParser;
 import dev.langchain4j.data.document.parser.TextDocumentParser;
@@ -20,6 +21,8 @@ class DocumentLoaderUtils {
 
     static DocumentParser parserFor(DocumentType type) {
         switch (type) {
+            case MD:
+                return new MarkdownDocumentParser();
             case TXT:
             case HTML:
             case UNKNOWN:

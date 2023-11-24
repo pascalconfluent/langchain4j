@@ -107,6 +107,17 @@ class FileSystemDocumentLoaderTest {
     }
 
     @Test
+    void should_load_markdown_document() {
+
+        Document document = loadDocument(toPath("test-file.md"));
+
+        assertThat(document.text()).isEqualToIgnoringWhitespace("An h1 header\nParagraphs are separated by a blank line.\n2nd paragraph. Italic, bold, and \"monospace\". Itemized lists");
+        Metadata metadata = document.metadata();
+        assertThat(metadata.get("file_name")).isEqualTo("test-file.md");
+        assertThat(Paths.get(metadata.get("absolute_directory_path"))).isAbsolute();
+    }
+
+    @Test
     void should_load_documents_from_directory_including_unknown_document_types() {
 
         String userDir = System.getProperty("user.dir");

@@ -19,6 +19,7 @@ public class Document {
     public static final String FILE_NAME = "file_name";
     public static final String ABSOLUTE_DIRECTORY_PATH = "absolute_directory_path";
     public static final String URL = "url";
+    public static final String CONTENT_LENGTH = "content_length";
 
     private final String text;
     private final Metadata metadata;

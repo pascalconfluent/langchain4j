@@ -10,6 +10,7 @@ public enum DocumentType {
     DOC(".doc", ".docx"),
     XLS(".xls", ".xlsx"),
     PPT(".ppt", ".pptx"),
+    MD(".md"),
     UNKNOWN;
 
     private final Iterable<String> supportedExtensions;
